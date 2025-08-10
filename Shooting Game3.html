@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3rd Person Stickman Shooter</title>
+<style>
+  html, body {
+    margin:0; padding:0; background:#222;
+    height:100%; overflow:hidden;
+    font-family: Arial, sans-serif;
+    user-select:none;
+  }
+  #gameCanvas {
+    display:block; background:#0c0f12;
+    margin: auto;
+    border: 2px solid #444;
+    border-radius: 10px;
+    touch-action:none;
+  }
+  #ui {
+    position: fixed; top: 10px; left: 10px;
+    color: #eee; font-size: 16px;
+    background: rgba(0,0,0,0.4); padding: 8px 12px;
+    border-radius: 8px;
+    max-width: 280px;
+  }
+  #playAgainBtn {
+    display:none;
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 16px 36px;
+    font-size: 20px;
+    background: #ff6666;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+  }
+  #weaponSwitch {
+    position: fixed; bottom: 15px; left: 50%;
+    transform: translateX(-50%);
+    display: flex; gap: 10px;
+  }
+  .weaponBtn {
+    background: #444;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background 0.3s;
+  }
+  .weaponBtn.active, .weaponBtn:hover {
+    background: #ff6666;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas" width="1000" height="600"></canvas>
+<div id="ui"></div>
+<div id="weaponSwitch">
+  <button class="weaponBtn" data-weapon="pistol">Pistol (1)</button>
+  <button class="weaponBtn" data-weapon="rifle">Rifle (2)</button>
+  <button class="weaponBtn" data-weapon="shotgun">Shotgun (3)</button>
+</div>
+<button id="playAgainBtn">Play Again</button>
+
+<script>
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const ui = document.getElementById('ui');
+  const playAgainBtn = document.getElementById('playAgainBtn');
+  const weaponButtons = [...document.querySelectorAll('.weaponBtn')];
+
+  // Utility
+  const clamp = (x, min, max) => Math.min(max, Math.max(min, x));
+  const dist = (x1,y1,x2,y2) => Math.hypot(x2-x1,y2-y1);
+  const lerp = (a,b,t) => a + (b - a) * t;
+  const randomRange = (min,max) => Math.random()*(max-min)+min;
+
+  // Gun data
+  const GUNS = {
+    pistol:  { name:'Pistol',  dmg:18, spread:0.15, rate:250, mag:12, reloadTime:900, pellets:1, bulletSpeed:12 },
+    rifle:   { name:'Rifle',   dmg:11, spread:0.06, rate:110, mag:30, reloadTime:1300, pellets:1, bulletSpeed:16 },
+    shotgun: { name:'Shotgun', dmg:7,  spread:0.35, rate:900, mag:6,  reloadTime:1500, pellets:7, bulletSpeed:10 },
+  };
+
+  // Character factory
+  function makeCharacter(x, y, color) {
+    return {
+      x, y,
+      vx:0, vy:0,
+      width: 30, height: 60,
+      color,
+      hp: 100,
+      weapon: 'pistol',
+      ammo: { pistol: 12, rifle: 30, shotgun: 6 },
+      reloading: false,
+      lastShotTime: 0,
+      walkCycle: 0,
+      aimingAngle: 0,
+      grounded: false,
+      jumpSpeed: -11,
+      score: 0,
+    };
+  }
+
+  const GRAVITY = 0.65;
+  const FLOOR_Y = H - 70;
+
+  const player = makeCharacter(200, FLOOR_Y - 60, '#7abaff');
+  const bot = makeCharacter(750, FLOOR_Y - 60, '#ff9999');
+
+  let bullets = [];
+
+  // Input
+  const keys = {};
+  let mousePos = {x: player.x, y: player.y};
+  let mouseDown = false;
+
+  // Controls
+  window.addEventListener('keydown', e => {
+    keys[e.key.toLowerCase()] = true;
+    if (e.key === '1') setWeapon('pistol');
+    if (e.key === '2') setWeapon('rifle');
+    if (e.key === '3') setWeapon('shotgun');
+    if (e.key.toLowerCase() === 'r') startReload(player);
+  });
+  window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    mousePos.x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    mousePos.y = (e.clientY - rect.top) * (canvas.height / rect.height);
+  });
+
+  canvas.addEventListener('mousedown', e => { mouseDown = true; });
+  canvas.addEventListener('mouseup', e => { mouseDown = false; });
+
+  // Touch support
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    mousePos.x = (touch.clientX - rect.left) * (canvas.width / rect.width);
+    mousePos.y = (touch.clientY - rect.top) * (canvas.height / rect.height);
+    mouseDown = true;
+  }, {passive:false});
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    const touch = e.touches[0];
+    const rect = canvas.getBoundingClientRect();
+    mousePos.x = (touch.clientX - rect.left) * (canvas.width / rect.width);
+    mousePos.y = (touch.clientY - rect.top) * (canvas.height / rect.height);
+  }, {passive:false});
+  canvas.addEventListener('touchend', e => { mouseDown = false; });
+
+  // Weapon UI
+  function updateWeaponButtons(){
+    weaponButtons.forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.weapon === player.weapon);
+    });
+  }
+  weaponButtons.forEach(btn => {
+    btn.onclick = () => { setWeapon(btn.dataset.weapon); };
+  });
+
+  function setWeapon(w) {
+    if(player.reloading) return;
+    if(player.weapon === w) return;
+    player.weapon = w;
+    updateWeaponButtons();
+  }
+  updateWeaponButtons();
+
+  // Reload
+  function startReload(char) {
+    if(char.reloading) return;
+    if(char.ammo[char.weapon] === GUNS[char.weapon].mag) return;
+    char.reloading = true;
+    setTimeout(() => {
+      char.ammo[char.weapon] = GUNS[char.weapon].mag;
+      char.reloading = false;
+    }, GUNS[char.weapon].reloadTime);
+  }
+
+  // Shooting
+  function shoot(char, targetX, targetY) {
+    if(char.reloading) return;
+    const now = performance.now();
+    if(now - char.lastShotTime < GUNS[char.weapon].rate) return;
+    if(char.ammo[char.weapon] <= 0) {
+      startReload(char);
+      return;
+    }
+
+    char.lastShotTime = now;
+    char.ammo[char.weapon]--;
+
+    let baseAngle = Math.atan2(targetY - (char.y + char.height/2), targetX - (char.x + char.width/2));
+    const gun = GUNS[char.weapon];
+
+    // Shotgun pellets
+    for(let i = 0; i < gun.pellets; i++){
+      let spreadAngle = baseAngle + (Math.random() - 0.5) * gun.spread;
+      let speed = gun.bulletSpeed;
+      bullets.push({
+        x: char.x + char.width/2,
+        y: char.y + char.height/2,
+        dx: Math.cos(spreadAngle) * speed,
+        dy: Math.sin(spreadAngle) * speed,
+        dmg: gun.dmg,
+        owner: char,
+        radius: 5,
+        color: char.color,
+      });
+    }
+  }
+
+  // Physics & movement
+  function updatePhysics(char, dt){
+    // Gravity
+    char.vy += GRAVITY;
+
+    // Player controls
+    if(char === player){
+      if(keys['a']) char.vx = -5;
+      else if(keys['d']) char.vx = 5;
+      else char.vx = 0;
+
+      if(keys['w'] && char.grounded){
+        char.vy = char.jumpSpeed;
+        char.grounded = false;
+      }
+    } else {
+      botAI(char, dt);
+    }
+
+    char.x += char.vx;
+    char.y += char.vy;
+
+    // Floor collision
+    if(char.y + char.height >= FLOOR_Y){
+      char.y = FLOOR_Y - char.height;
+      char.vy = 0;
+      char.grounded = true;
+    }
+
+    char.x = clamp(char.x, 0, W - char.width);
+  }
+
+  // Bot AI
+  let botLastChange = 0;
+  function botAI(botChar, dt){
+    if(botChar.hp <= 0) return;
+    const now = performance.now();
+
+    const targetX = player.x + player.width/2;
+    const targetY = player.y + player.height/2;
+
+    const distX = targetX - (botChar.x + botChar.width/2);
+    if(Math.abs(distX) > 250){
+      botChar.vx += (distX > 0 ? 0.2 : -0.2);
+    } else if(Math.abs(distX) < 180){
+      botChar.vx += (distX > 0 ? -0.2 : 0.2);
+    }
+    botChar.vx *= 0.9;
+
+    if(botChar.grounded && Math.random() < 0.004) botChar.vy = botChar.jumpSpeed, botChar.grounded = false;
+
+    if(now - botLastChange > 1500){
+      if(Math.abs(distX) < 180) botChar.weapon = 'shotgun';
+      else if(Math.abs(distX) < 450) botChar.weapon = 'rifle';
+      else botChar.weapon = 'pistol';
+      botLastChange = now;
+    }
+
+    let leadTime = 0.4;
+    let predX = player.x + player.vx * leadTime + player.width/2;
+    let predY = player.y + player.vy * leadTime + player.height/2;
+
+    let aimAngle = Math.atan2(predY - (botChar.y + botChar.height/2), predX - (botChar.x + botChar.width/2));
+    botChar.aimingAngle = aimAngle;
+
+    if(now - botChar.lastShotTime > GUNS[botChar.weapon].rate){
+      if(botChar.ammo[botChar.weapon] <= 0) startReload(botChar);
+      else shoot(botChar, predX, predY);
+    }
+  }
+
+  // Bullets update
+  function updateBullets(dt){
+    for(let i = bullets.length - 1; i >= 0; i--){
+      let b = bullets[i];
+      b.x += b.dx;
+      b.y += b.dy;
+
+      if(b.x < -10 || b.x > W+10 || b.y < -10 || b.y > H+10){
+        bullets.splice(i,1);
+        continue;
+      }
+
+      const targets = [player, bot].filter(t => t !== b.owner);
+      for(let t of targets){
+        let cx = t.x + t.width/2;
+        let cy = t.y + t.height/2;
+        if(dist(b.x,b.y,cx,cy) < b.radius + 12){
+          t.hp -= b.dmg;
+          bullets.splice(i,1);
+          break;
+        }
+      }
+    }
+  }
+
+  // Drawing
+  function drawFloor(){
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+    for(let x=0; x < W; x += 40){
+      ctx.strokeStyle = '#111';
+      ctx.beginPath();
+      ctx.moveTo(x, FLOOR_Y);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+  }
+
+  function drawStickman(char){
+    ctx.save();
+    ctx.translate(char.x + char.width/2, char.y + char.height);
+
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(0, 10, 20, 6, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.translate(0, -char.height);
+
+    const walk = Math.sin(char.walkCycle * 0.15) * 10;
+    const legY = 35;
+    const armY = 20;
+
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = char.color;
+    ctx.lineWidth = 5;
+
+    // Legs
+    ctx.beginPath();
+    ctx.moveTo(-10, legY);
+    ctx.lineTo(-10 + walk, legY + 40);
+    ctx.moveTo(10, legY);
+    ctx.lineTo(10 - walk, legY + 40);
+    ctx.stroke();
+
+    // Torso
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(0, 35);
+    ctx.stroke();
+
+    // Head
+    ctx.fillStyle = '#222';
+    ctx.strokeStyle = char.color;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, -15, 15, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Arms & gun
+    ctx.save();
+    ctx.translate(0, armY);
+    ctx.rotate(char.aimingAngle);
+    ctx.strokeStyle = '#444';
+    ctx.lineWidth = 10;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(35, 0);
+    ctx.stroke();
+
+    drawGunShape(char.weapon);
+
+    ctx.restore();
+
+    ctx.restore();
+
+    // Health bar
+    const healthBarWidth = 60;
+    const healthBarHeight = 8;
+    const x = char.x + char.width/2 - healthBarWidth/2;
+    const y = char.y - 20;
+    ctx.fillStyle = '#555';
+    ctx.fillRect(x, y, healthBarWidth, healthBarHeight);
+    ctx.fillStyle = '#f55';
+    ctx.fillRect(x, y, healthBarWidth * clamp(char.hp / 100, 0, 1), healthBarHeight);
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, healthBarWidth, healthBarHeight);
+  }
+
+  function drawGunShape(weapon){
+    ctx.fillStyle = '#222';
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    switch(weapon){
+      case 'pistol':
+        ctx.fillRect(15, -4, 20, 8);
+        ctx.strokeRect(15, -4, 20, 8);
+        break;
+      case 'rifle':
+        ctx.fillRect(10, -6, 40, 12);
+        ctx.strokeRect(10, -6, 40, 12);
+        ctx.fillRect(40, -10, 8, 20);
+        ctx.strokeRect(40, -10, 8, 20);
+        break;
+      case 'shotgun':
+        ctx.fillRect(10, -5, 32, 10);
+        ctx.strokeRect(10, -5, 32, 10);
+        ctx.fillRect(40, -4, 4, 8);
+        ctx.strokeRect(40, -4, 4, 8);
+        break;
+    }
+  }
+
+  function drawBullets(){
+    bullets.forEach(b => {
+      ctx.fillStyle = b.color;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.radius, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(0,0,0,0.15)';
+      ctx.beginPath();
+      ctx.ellipse(b.x+2, b.y+2, b.radius+2, b.radius, 0, 0, Math.PI*2);
+      ctx.fill();
+    });
+  }
+
+  // Game loop
+  let lastTime = 0;
+  let gameOver = false;
+
+  function resetGame(){
+    player.x = 200; player.y = FLOOR_Y - player.height; player.hp = 100;
+    bot.x = 750; bot.y = FLOOR_Y - bot.height; bot.hp = 100;
+    player.vx = player.vy = bot.vx = bot.vy = 0;
+    player.ammo = { pistol: 12, rifle: 30, shotgun: 6 };
+    bot.ammo = { pistol: 12, rifle: 30, shotgun: 6 };
+    player.weapon = 'pistol';
+    bot.weapon = 'pistol';
+    player.reloading = false;
+    bot.reloading = false;
+    bullets = [];
+    gameOver = false;
+    playAgainBtn.style.display = 'none';
+  }
+
+  playAgainBtn.onclick = () => {
+    resetGame();
+  };
+
+  function update(dt){
+    if(gameOver) return;
+
+    updatePhysics(player, dt);
+    updatePhysics(bot, dt);
+
+    if(mouseDown) shoot(player, mousePos.x, mousePos.y);
+
+    updateBullets(dt);
+
+    player.walkCycle += Math.abs(player.vx) * 0.3;
+    bot.walkCycle += Math.abs(bot.vx) * 0.3;
+   // Update aiming angles
+    player.aimingAngle = Math.atan2(mousePos.y - (player.y + player.height/2), mousePos.x - (player.x + player.width/2));
+
+    // Check if someone died
+    if(player.hp <= 0 || bot.hp <= 0){
+      gameOver = true;
+      playAgainBtn.style.display = 'block';
+      ui.textContent = player.hp <= 0 ? "You lost! Press Play Again." : "You won! Press Play Again.";
+    } else {
+      ui.innerHTML = `
+        <b>Your HP:</b> ${player.hp.toFixed(0)}<br>
+        <b>Weapon:</b> ${GUNS[player.weapon].name} (${player.ammo[player.weapon]}/${GUNS[player.weapon].mag})<br>
+        <b>Enemy HP:</b> ${bot.hp.toFixed(0)}<br>
+        <b>Controls:</b> Move: A/D, Jump: W, Shoot: Click/Touch, Switch weapon: 1/2/3, Reload: R
+      `;
+    }
+  }
+
+  function draw(){
+    ctx.clearRect(0, 0, W, H);
+
+    drawFloor();
+    drawStickman(player);
+    drawStickman(bot);
+    drawBullets();
+  }
+
+  function loop(ts=0){
+    if(!lastTime) lastTime = ts;
+    let dt = (ts - lastTime) / 16;
+    lastTime = ts;
+
+    update(dt);
+    draw();
+
+    requestAnimationFrame(loop);
+  }
+
+  resetGame();
+  requestAnimationFrame(loop);
+})();
+</script>
+
+</body>
+</html>
